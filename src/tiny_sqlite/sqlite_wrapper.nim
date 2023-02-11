@@ -21,7 +21,7 @@ type
         {.cdecl, raises: [].}
 
     SqliteDestructor* = proc (p: pointer)
-        {.cdecl, locks: 0, tags: [], raises: [], gcsafe.}
+        {.cdecl, tags: [], raises: [], gcsafe.}
 
 const
     SQLITE_OK*         = 0.cint
@@ -96,7 +96,7 @@ const
   SQLITE_ALTER_TABLE* = 26.cint
   SQLITE_REINDEX* = 27.cint
   SQLITE_DENY* = 1.cint
-  SQLITE_IGNORE* = 2.cint 
+  SQLITE_IGNORE* = 2.cint
   SQLITE_DETERMINISTIC* = 0x800.cint
 
 const
@@ -222,6 +222,12 @@ proc column_count*(stmt: Stmt): cint
 
 proc column_name*(stmt: Stmt, col: cint): cstring
     {.cdecl, dynlib: Lib, importc: "sqlite3_column_name".}
+
+proc column_database_name*(stmt: Stmt, col: cint): cstring
+    {.cdecl, dynlib: Lib, importc: "sqlite3_column_database_name".}
+
+proc column_origin_name*(stmt: Stmt, col: cint): cstring
+    {.cdecl, dynlib: Lib, importc: "sqlite3_column_origin_name".}
 
 proc column_table_name*(stmt: Stmt, col: cint): cstring
     {.cdecl, dynlib: Lib, importc: "sqlite3_column_table_name".}

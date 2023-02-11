@@ -13,7 +13,7 @@ when not declared(tupleLen):
 export options.get, options.isSome, options.isNone
 
 type
-    DbConnImpl = ref object 
+    DbConnImpl = ref object
         handle: sqlite.Sqlite3 ## The underlying SQLite3 handle
         cache: StmtCache
 
@@ -62,13 +62,19 @@ type
         values: seq[DbValue]
         columns: seq[string]
 
+    ColumnMetadata* = object
+        databaseName*: string
+        tableName*: string
+        originName*: string
+
+
 const SqliteRcOk = [ sqlite.SQLITE_OK, sqlite.SQLITE_DONE, sqlite.SQLITE_ROW ]
 
 
 # Forward declarations
-proc isInTransaction*(db: DbConn): bool {.noSideEffect.}
-proc isOpen*(db: DbConn): bool {.noSideEffect, inline.}
-proc isAlive*(statement: SqlStatement): bool {.noSideEffect.}
+func isInTransaction*(db: DbConn): bool {.raises: [].}
+func isOpen*(db: DbConn): bool {.inline, raises: [].}
+func isAlive*(statement: SqlStatement): bool {.raises: [].}
 
 template handle(db: DbConn): sqlite.Sqlite3 = DbConnImpl(db).handle
 template handle(statement: SqlStatement): sqlite.Stmt = SqlStatementImpl(statement).handle
@@ -105,7 +111,7 @@ proc skipLeadingWhiteSpaceAndComments(sql: var cstring) =
     let original = sql
 
     template `&+`(s: cstring, offset: int): cstring =
-        cast[cstring](cast[ByteAddress](sql) + offset)
+        cast[cstring](cast[uint](sql) + offset)
 
     while true:
         case sql[0]
@@ -173,7 +179,7 @@ proc toDbValue*[T: type(nil)](val: T): DbValue =
 proc toDbValues*(values: varargs[DbValue, toDbValue]): seq[DbValue] =
     ## Convert several values to a sequence of DbValue's.
     runnableExamples:
-        doAssert toDbValues("string", 23) == @[toDbValue("string"), toDbValue(23)] 
+        doAssert toDbValues("string", 23) == @[toDbValue("string"), toDbValue(23)]
     @values
 
 proc fromDbValue*(value: DbValue, T: typedesc[Ordinal]): T =
@@ -204,9 +210,9 @@ proc fromDbValue*(value: DbValue, T: typedesc[DbValue]): T =
     ## The purpose of this overload is to do partial unpacking.
     ## For example, if the type of one column in a result row is unknown,
     ## the DbValue type can be kept just for that column.
-    ## 
+    ##
     ## .. code-block:: nim
-    ## 
+    ##
     ##   for row in db.iterate("SELECT name, extra FROM Person"):
     ##       # Type of 'extra' is unknown, so we don't unpack it.
     ##       # The 'extra' variable will be of type 'DbValue'
@@ -241,7 +247,7 @@ proc `==`*(a, b: DbValue): bool =
 
 proc bindParams(db: DbConn, stmtHandle: sqlite.Stmt, params: varargs[DbValue]): Rc =
     result = sqlite.SQLITE_OK
-    let expectedParamsLen = sqlite.bind_parameter_count(stmtHandle) 
+    let expectedParamsLen = sqlite.bind_parameter_count(stmtHandle)
     if expectedParamsLen != params.len:
         raise newSqliteError("SQL statement contains " & $expectedParamsLen &
             " parameters but only " & $params.len & " was provided.")
@@ -256,7 +262,7 @@ proc bindParams(db: DbConn, stmtHandle: sqlite.Stmt, params: varargs[DbValue]): 
                 sqlite.bind_int64(stmtHandle, idx, value.intval)
             of sqliteReal:
                 sqlite.bind_double(stmtHandle, idx, value.floatVal)
-            of sqliteText:   
+            of sqliteText:
                 sqlite.bind_text(stmtHandle, idx, value.strVal.cstring, value.strVal.len.int32, sqlite.SQLITE_TRANSIENT)
             of sqliteBlob:
                 sqlite.bind_blob(stmtHandle, idx.int32, cast[string](value.blobVal).cstring,
@@ -266,7 +272,8 @@ proc bindParams(db: DbConn, stmtHandle: sqlite.Stmt, params: varargs[DbValue]): 
             return rc
         idx.inc
 
-proc prepareSql(db: DbConn, sql: string): sqlite.Stmt =
+proc prepareSql(db: DbConn, sql: string): sqlite.Stmt
+               {.raises: [SqliteError].} =
     var tail: cstring
     let rc = sqlite.prepare_v2(db.handle, sql.cstring, sql.len.cint + 1, result, tail)
     db.checkRc(rc)
@@ -338,7 +345,8 @@ iterator iterate(db: DbConn, stmtOrHandle: sqlite.Stmt | SqlStatement, params: v
 # DbConn
 #
 
-proc exec*(db: DbConn, sql: string, params: varargs[DbValue, toDbValue]) =
+proc exec*(db: DbConn, sql: string, params: varargs[DbValue, toDbValue])
+          {.raises: [SqliteError].} =
     ## Executes ``sql``, which must be a single SQL statement.
     runnableExamples:
         let db = openDatabase(":memory:")
@@ -361,19 +369,13 @@ template transaction*(db: DbConn, body: untyped) =
         body
     else:
         db.exec("BEGIN")
-        var ok = true
         try:
-            try:
-                body
-            except Exception:
-                ok = false
-                db.exec("ROLLBACK")
-                raise
+            body
         finally:
-            if ok:
-                db.exec("COMMIT")
+            db.exec(if getCurrentException() != nil: "ROLLBACK" else: "COMMIT")
 
-proc execMany*(db: DbConn, sql: string, params: seq[seq[DbValue]]) =
+proc execMany*(db: DbConn, sql: string, params: seq[seq[DbValue]])
+              {.raises: [SqliteError].} =
     ## Executes ``sql``, which must be a single SQL statement, repeatedly using each element of
     ## ``params`` as parameters. The statements are executed inside a transaction.
     assertCanUseDb db
@@ -381,7 +383,8 @@ proc execMany*(db: DbConn, sql: string, params: seq[seq[DbValue]]) =
         for p in params:
             db.exec(sql, p)
 
-proc execScript*(db: DbConn, sql: string) =
+proc execScript*(db: DbConn, sql: string)
+                {.raises: [SqliteError].} =
     ## Executes ``sql``, which can consist of multiple SQL statements.
     ## The statements are executed inside a transaction.
     assertCanUseDb db
@@ -399,7 +402,8 @@ proc execScript*(db: DbConn, sql: string) =
             remaining.skipLeadingWhiteSpaceAndComments()
 
 iterator iterate*(db: DbConn, sql: string,
-        params: varargs[DbValue, toDbValue]): ResultRow =
+                  params: varargs[DbValue, toDbValue]): ResultRow
+                 {.raises: [SqliteError].} =
     ## Executes ``sql``, which must be a single SQL statement, and yields each result row one by one.
     assertCanUseDb db
     let stmtHandle = db.prepareSql(sql, @params)
@@ -437,7 +441,7 @@ proc value*(db: DbConn, sql: string,
     for row in db.iterate(sql, params):
         return some(row.values[0])
 
-proc close*(db: DbConn) =
+proc close*(db: DbConn) {.raises: [SqliteError].} =
     ## Closes the database connection. This should be called once the connection will no longer be used
     ## to avoid leaking memory. Closing an already closed database is a harmless no-op.
     if not db.isOpen:
@@ -480,7 +484,7 @@ proc isReadonly*(db: DbConn): bool =
     assertCanUseDb db
     sqlite.db_readonly(db.handle, "main") == 1
 
-proc isOpen*(db: DbConn): bool {.inline.} =
+func isOpen*(db: DbConn): bool {.inline, raises: [].} =
     ## Returns true if `db` has been opened and not yet closed.
     runnableExamples:
         var db: DbConn
@@ -491,7 +495,7 @@ proc isOpen*(db: DbConn): bool {.inline.} =
         doAssert not db.isOpen
     (not DbConnImpl(db).isNil) and (not db.handle.isNil)
 
-proc isInTransaction*(db: DbConn): bool =
+func isInTransaction*(db: DbConn): bool {.raises: [].} =
     ## Returns true if a transaction is currently active.
     runnableExamples:
         let db = openDatabase(":memory:")
@@ -517,8 +521,9 @@ proc stmt*(db: DbConn, sql: string): SqlStatement =
     assertCanUseDb db
     let handle = prepareSql(db, sql)
     SqlStatementImpl(handle: handle, db: db).SqlStatement
-    
-proc exec*(statement: SqlStatement, params: varargs[DbValue, toDbValue]) =
+
+proc exec*(statement: SqlStatement, params: varargs[DbValue, toDbValue])
+          {.raises: [SqliteError].} =
     ## Executes `statement` with `params` as parameters.
     assertCanUseStatement statement
     var rc = statement.db.bindParams(statement.handle, params)
@@ -530,7 +535,8 @@ proc exec*(statement: SqlStatement, params: varargs[DbValue, toDbValue]) =
         resetStmt(statement.handle)
         statement.db.checkRc(rc)
 
-proc execMany*(statement: SqlStatement, params: seq[seq[DbValue]]) =
+proc execMany*(statement: SqlStatement, params: seq[seq[DbValue]])
+              {.raises: [SqliteError].} =
     ## Executes ``statement`` repeatedly using each element of ``params`` as parameters.
     ## The statements are executed inside a transaction.
     assertCanUseStatement statement
@@ -538,7 +544,9 @@ proc execMany*(statement: SqlStatement, params: seq[seq[DbValue]]) =
         for p in params:
             statement.exec(p)
 
-iterator iterate*(statement: SqlStatement, params: varargs[DbValue, toDbValue]): ResultRow =
+iterator iterate*(statement: SqlStatement,
+                  params: varargs[DbValue, toDbValue]): ResultRow
+                 {.raises: [SqliteError].} =
     ## Executes ``statement`` and yields each result row one by one.
     assertCanUseStatement statement
     var errorRc: int32
@@ -568,11 +576,30 @@ proc one*(statement: SqlStatement,
 
 proc value*(statement: SqlStatement,
         params: varargs[DbValue, toDbValue]): Option[DbValue] =
-    ## Executes `statement` and returns the first column of the first row found. 
+    ## Executes `statement` and returns the first column of the first row found.
     ## Returns `none(DbValue)` if no result was found.
     assertCanUseStatement statement
     for row in statement.iterate(params):
         return some(row.values[0])
+
+func columnCount*(statement: SqlStatement): int =
+    ## Get column count for the prepared statement.
+    assertCanUseStatement statement
+    sqlite.column_count(statement.handle)
+
+func columnMetadata*(statement: SqlStatement, idx: Natural): Option[ColumnMetadata] =
+    ## Get column metadata for the given column of the prepared statement.
+    ## See https://www.sqlite.org/c3ref/column_database_name.html
+    assertCanUseStatement statement
+    let
+      db = sqlite.column_database_name(statement.handle, idx.int32)
+      table = sqlite.column_table_name(statement.handle, idx.int32)
+      origin = sqlite.column_origin_name(statement.handle, idx.int32)
+    if db == nil or table == nil or origin == nil:
+      return none(ColumnMetadata)
+    some(ColumnMetadata(databaseName: $db,
+                        tableName: $table,
+                        originName: $origin))
 
 proc finalize*(statement: SqlStatement): void =
     ## Finalize the statement. This needs to be called once the statement is no longer used to
@@ -582,12 +609,15 @@ proc finalize*(statement: SqlStatement): void =
     discard sqlite.finalize(statement.handle)
     SqlStatementImpl(statement).handle = nil
 
-proc isAlive*(statement: SqlStatement): bool =
+func isAlive*(statement: SqlStatement): bool
+             {.raises: [].} =
     ## Returns true if ``statement`` has been initialized and not yet finalized.
     (not SqlStatementImpl(statement).isNil) and (not statement.handle.isNil) and
         (not statement.db.handle.isNil)
 
-proc openDatabase*(path: string, mode = dbReadWrite, cacheSize: Natural = 100): DbConn =
+proc openDatabase*(path: string, mode = dbReadWrite,
+                   cacheSize: Natural = 100): DbConn
+                  {.raises: [SqliteError].} =
     ## Open a new database connection to a database file. To create an
     ## in-memory database the special path `":memory:"` can be used.
     ## If the database doesn't already exist and ``mode`` is ``dbReadWrite``,
@@ -615,7 +645,8 @@ proc openDatabase*(path: string, mode = dbReadWrite, cacheSize: Natural = 100): 
     result.exec("PRAGMA foreign_keys = ON")
 
 when not defined(macosx):
-    proc loadExtension*(db: DbConn, path: string) =
+    proc loadExtension*(db: DbConn, path: string)
+                       {.raises: [SqliteError].} =
         ## Load an SQLite extension. Will raise a ``SqliteError`` exception if loading fails.
         db.checkRc sqlite.db_config(db.handle, sqlite.SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION, 1, 0);
         var err: cstring
@@ -672,7 +703,7 @@ proc unpack*[T: tuple](row: ResultRow, _: typedesc[T]): T =
 proc rows*(db: DbConn, sql: string, params: varargs[DbValue, toDbValue]): seq[seq[DbValue]]
         {.deprecated: "use 'all' instead".} =
     db.all(sql, params).mapIt(it.values)
-    
+
 iterator rows*(db: DbConn, sql: string, params: varargs[DbValue, toDbValue]): seq[DbValue]
         {.deprecated: "use 'iterate' instead".} =
     for row in db.all(sql, params):

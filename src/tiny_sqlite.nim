@@ -144,6 +144,9 @@ proc skipLeadingWhiteSpaceAndComments(sql: var cstring) =
 proc resetStmt(stmtHandle: sqlite.Stmt) =
     discard sqlite.reset(stmtHandle)
     discard sqlite.clear_bindings(stmtHandle)
+    
+proc `==`*(a, b: DbConn): bool =
+    a.handle == b.handle
 
 #
 # DbValue
